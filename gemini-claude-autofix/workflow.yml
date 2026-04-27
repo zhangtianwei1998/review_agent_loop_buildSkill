@@ -1,0 +1,30 @@
+name: Gemini Review Autofix
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  autofix:
+    # Only run when Gemini Code Assist submits a review
+    if: github.event.review.user.login == 'gemini-code-assist[bot]'
+    runs-on: [self-hosted, local]
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run autofix script
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_ID: ${{ github.event.review.id }}
+          REPO: ${{ github.repository }}
+        run: bash scripts/gemini-autofix.sh
