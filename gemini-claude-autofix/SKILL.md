@@ -1,13 +1,13 @@
 ---
 name: gemini-claude-autofix
-description: Use when setting up an automated PR review agent loop: Gemini Code Assist reviews a PR, a self-hosted GitHub Actions runner triggers, and Claude Code CLI automatically fixes High/Medium priority issues and pushes them to the PR branch (or posts a comment explaining why it cannot fix something).
+description: Use when setting up an automated PR review agent loop: Gemini Code Assist reviews a PR, a self-hosted GitHub Actions runner triggers, and Claude Code CLI automatically fixes High/Medium priority issues and pushes them to the PR branch (or posts a comment explaining why it can't fix something).
 ---
 
 # Gemini → Claude Code Autofix Agent Loop
 
 ## Overview
 
-After a PR is opened, Gemini Code Assist reviews it. A self-hosted runner picks up the `pull_request_review` event, extracts High/Medium priority comments, and calls Claude Code CLI (`claude --print`) to apply fixes. If Claude fixes files, they are committed and pushed to the PR branch. If Claude cannot fix something, it posts a PR comment with a formatted explanation.
+After a PR is opened, Gemini Code Assist reviews it. A self-hosted runner picks up the `pull_request_review` event, extracts High/Medium priority comments, and calls Claude Code CLI (`claude --print`) to apply fixes. If Claude fixes files, they are committed and pushed to the PR branch. If Claude can't fix something, it posts a PR comment explaining why.
 
 **Core principle:** Gemini reviews → Claude fixes → zero human interrupt for routine issues.
 
@@ -40,14 +40,13 @@ PR pushed ──► Gemini Code Assist (Bot)
                     │
                     ▼
        scripts/gemini-autofix.sh
-         0. Count consecutive [autofix] commits → exit if ≥ MAX_AUTOFIX_ITERATIONS
          1. Fetch review comments via gh api
          2. Fetch PR title/description
          3. Filter High/Medium priority (SVG URL pattern)
          4. Embed actual code lines into prompt
          5. Call claude --print with prompt
-         6a. Files changed → git commit (message from COMMIT_MSG: output) + push
-         6b. Skipped → gh pr comment with formatted markdown list of reasons
+         6a. Files changed → git commit + push
+         6b. Skipped → gh pr comment with reasons
 ```
 
 ## Setup Steps
@@ -128,8 +127,8 @@ gh run view <run_id> --log
 ```
 
 Two expected outcomes (both are success):
-- Gemini found fixable issues → new commit appears on the PR branch with a descriptive message ending in `[autofix]`
-- Gemini found unfixable issues → PR comment starting with `## Gemini Autofix：` appears with a markdown list of reasons
+- Gemini found fixable issues → new commit `fix: apply Gemini review suggestions [autofix]` appears on the PR branch
+- Gemini found unfixable issues → PR comment starting with `## Gemini Autofix：` appears
 
 ## Critical Gotchas
 
@@ -213,64 +212,6 @@ if not abs_path.startswith(repo_root + os.sep):
     code = '(路径校验失败，跳过)'
 ```
 
-### 8. Loop prevention: Gemini re-reviews autofix commits
-
-When autofix pushes a commit, Gemini detects the new push and submits another review, which would re-trigger the workflow indefinitely.
-
-The script counts **consecutive `[autofix]` commits from HEAD**. If the count reaches `MAX_AUTOFIX_ITERATIONS`, it exits early:
-
-```bash
-AUTOFIX_COUNT=0
-while IFS= read -r msg; do
-    if echo "$msg" | grep -q '\[autofix\]'; then
-        AUTOFIX_COUNT=$((AUTOFIX_COUNT + 1))
-    else
-        break
-    fi
-done < <(git log --format="%s" HEAD)
-```
-
-Key properties:
-- Developer pushes a new (non-autofix) commit → counter resets to 0, autofix can run again
-- Default max: **3** — configure via GitHub repo **Settings → Variables → `MAX_AUTOFIX_ITERATIONS`**
-- Every autofix commit carries the `[autofix]` tag — do not change this suffix
-
-## How Claude Generates Commit Messages
-
-Claude outputs a `COMMIT_MSG:` line in stdout describing the actual changes made:
-
-```
-COMMIT_MSG: fix: use timezone-aware datetime in invitation_service and course_service
-```
-
-The script appends `[autofix]` to mark the commit as machine-generated:
-
-```
-fix: use timezone-aware datetime in invitation_service and course_service [autofix]
-```
-
-If Claude does not output a `COMMIT_MSG:` line (rare), the script falls back to listing changed files:
-
-```
-fix: apply Gemini review suggestions in src/service.py, src/model.py [autofix]
-```
-
-## How Claude Signals "Skip"
-
-If Claude cannot safely fix a comment, it prints to stdout:
-
-```
-SKIP: path/to/file.py - Reason why: e.g. comment is already fixed at line 42 (code now uses timezone.utc); no action needed.
-```
-
-The prompt instructs Claude to explain: whether the comment is already fixed or incorrect, why auto-fix is inappropriate, and what human action is needed.
-
-The script formats all `^SKIP:` lines as a markdown list in the PR comment:
-
-```
-- `path/to/file.py`：comment is already fixed at line 42 (code now uses timezone.utc); no action needed.
-```
-
 ## Environment Variables Reference
 
 | Variable | Source | Description |
@@ -278,16 +219,25 @@ The script formats all `^SKIP:` lines as a markdown list in the PR comment:
 | `GH_TOKEN` | `secrets.GITHUB_TOKEN` (workflow) | GitHub API access |
 | `PR_NUMBER` | workflow event | PR number |
 | `REVIEW_ID` | workflow event | Gemini review ID |
-| `MAX_AUTOFIX_ITERATIONS` | `vars.MAX_AUTOFIX_ITERATIONS` (repo variable, default `3`) | Max consecutive autofix loop iterations |
 | `REPO` | `github.repository` | `owner/repo` format |
 | `ANTHROPIC_AUTH_TOKEN` | `~/actions-runner/.env` | LLM API token (never in git) |
 | `ANTHROPIC_BASE_URL` | `~/actions-runner/.env` | LLM API endpoint (never in git) |
 | `CLAUDE_PATH` | `~/actions-runner/.env` | Absolute path to `claude` binary |
 
+## How Claude Signals "Skip"
+
+If Claude cannot safely fix a comment, it prints to stdout:
+
+```
+SKIP: path/to/file.py - Reason: involves architectural decision, needs human review
+```
+
+The script collects all `^SKIP:` lines and posts them as a PR comment.
+
 ## Customization
 
 - **Change priority filter**: edit the `is_high`/`is_medium` lines in the Python section of `gemini-autofix.sh`
-- **Change max loop iterations**: set `MAX_AUTOFIX_ITERATIONS` in GitHub repo Settings → Variables (default: 3)
+- **Change commit message**: edit the `git commit -m` line
 - **Change runner label**: edit `runs-on: [self-hosted, local]` in the workflow
 - **Change Claude model**: set `ANTHROPIC_MODEL` in runner `.env` (uses Claude's default if unset)
 - **Prompt language**: the default prompt is in Chinese; replace with your language
@@ -299,4 +249,3 @@ The script formats all `^SKIP:` lines as a markdown list in the PR comment:
 | `SKILL.md` | This guide |
 | `gemini-autofix.sh` | Main script — copy to `scripts/` in target repo |
 | `workflow.yml` | GitHub Actions workflow — copy to `.github/workflows/gemini-autofix.yml` |
-
